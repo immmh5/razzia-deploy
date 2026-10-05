@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: razzia
+    runtime: image
+    imagePath: ghcr.io/immmh5/razzia-deploy:3.2.0
+    plan: free
+    region: oregon
+    dockerCommand: ""
+    dockerContext: ""
+    dockerfilePath: ""
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: CONFIG_PATH
+        value: /app/config
+      - key: MANAGER_PASSWORD
+        sync: false
