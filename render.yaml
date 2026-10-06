@@ -2,7 +2,7 @@ services:
   - type: web
     name: razzia
     runtime: image
-    imagePath: ghcr.io/immmh5/razzia-deploy:3.2.0
+    imagePath: ghcr.io/immmh5/razzia-deploy:3.3.0
     plan: free
     region: oregon
     dockerCommand: ""
