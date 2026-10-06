@@ -41,7 +41,7 @@ export interface RoundManagerOptions {
   broadcast: BroadcastFn
   send: SendFn
   onNewQuestion: () => void
-  onGameFinished: (_result: GameResult) => void
+  onGameFinished: (_result: GameResult) => void | Promise<void>
 }
 
 export class RoundManager {
@@ -332,17 +332,23 @@ export class RoundManager {
 
       const top = this.leaderboard.slice(0, 3)
 
-      this.opts.onGameFinished({
-        id: `${Date.now()}-${nanoid(8)}`,
-        subject: this.opts.quizz.subject,
-        date: new Date().toISOString(),
-        players: this.leaderboard.map((player, index) => ({
-          username: player.username,
-          points: player.points,
-          rank: index + 1,
-        })),
-        questions: this.questionsHistory,
-      })
+      // Result persistence is best-effort: a DB failure must not break the
+      // end-of-game broadcast to players.
+      Promise.resolve(
+        this.opts.onGameFinished({
+          id: `${Date.now()}-${nanoid(8)}`,
+          subject: this.opts.quizz.subject,
+          date: new Date().toISOString(),
+          players: this.leaderboard.map((player, index) => ({
+            username: player.username,
+            points: player.points,
+            rank: index + 1,
+          })),
+          questions: this.questionsHistory,
+        }),
+      ).catch((error: unknown) =>
+        console.error("Failed to persist result:", error),
+      )
 
       this.opts.send(this.opts.getManagerId(), STATUS.FINISHED, {
         subject: this.opts.quizz.subject,

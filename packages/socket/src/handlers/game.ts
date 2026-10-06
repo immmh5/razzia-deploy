@@ -66,9 +66,8 @@ export const gameSocketHandlers = ({ io, socket }: SocketContext) => {
 
   socket.on(
     EVENTS.GAME.CREATE,
-    manager.withAuth(socket, (quizzId: string) => {
-      const quizzList = getQuizz()
-      const quizz = quizzList.find((q) => q.id === quizzId)
+    manager.withAuth(socket, async (quizzId: string) => {
+      const quizz = (await getQuizz()).find((q) => q.id === quizzId)
 
       if (!quizz) {
         socket.emit(EVENTS.GAME.ERROR_MESSAGE, "errors:quizz.notFound")

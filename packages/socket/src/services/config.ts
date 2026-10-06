@@ -1,3 +1,4 @@
+import { createClient, type Row, type Value } from "@libsql/client"
 import { EXAMPLE_QUIZZ } from "@razzia/common/constants"
 import type {
   GameResult,
@@ -5,141 +6,119 @@ import type {
   QuizzWithId,
 } from "@razzia/common/types/game"
 import { quizzValidator } from "@razzia/common/validators/quizz"
-import { normalizeFilename } from "@razzia/socket/utils/game"
-import fs from "fs"
 import { nanoid } from "nanoid"
-import { join, resolve } from "path"
 
 interface GameConfig {
   managerPassword: string
 }
 
-const inContainerPath = process.env.CONFIG_PATH
-
-const getPath = (path = "") =>
-  inContainerPath
-    ? resolve(inContainerPath, path)
-    : resolve(process.cwd(), "../../config", path)
-
-const readJson = (filePath: string): Record<string, unknown> | null => {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<
-      string,
-      unknown
-    >
-  } catch {
-    return null
-  }
+// LibSQL rows are array-like Records of Values; these describe the columns we
+// select so reads are checked against the actual query.
+interface QuizzRow extends Row {
+  id: Value
+  data: Value
 }
 
-// Lstat (not stat) so a symlink planted in the config dir is skipped instead
-// of followed outside it.
-const listJsonFiles = (dirPath: string): string[] =>
-  fs.readdirSync(dirPath).filter((file) => {
-    if (!file.endsWith(".json")) {
-      return false
-    }
-
-    try {
-      return fs.lstatSync(join(dirPath, file)).isFile()
-    } catch {
-      return false
-    }
-  })
-
-const resolveFileId = (dirPath: string, file: string): string => {
-  const data = readJson(join(dirPath, file))
-
-  return typeof data?.id === "string" ? data.id : file.replace(/\.json$/u, "")
+interface ConfigRow extends Row {
+  data: Value
 }
 
-// Never builds a path from `id` — avoids path traversal by construction.
-const findFileById = (subDir: string, id: string): string | undefined => {
-  const dirPath = getPath(subDir)
+interface CountRow extends Row {
+  count: Value
+}
 
-  if (!fs.existsSync(dirPath)) {
-    return undefined
+// Reading a column is explicit so a bad row is caught here instead of
+// corrupting a payload deeper in the app.
+const readString = (row: Row, column: string): string => {
+  const value = row[column]
+
+  if (typeof value !== "string") {
+    throw new Error(`Expected string at "${column}", got ${typeof value}`)
   }
 
-  return listJsonFiles(dirPath).find(
-    (file) => resolveFileId(dirPath, file) === id,
+  return value
+}
+
+// LibSQL (Turso) client. Falls back to a local embedded replica on disk when
+// no database URL is configured, so local `pnpm dev` keeps working unchanged.
+const configDir = process.env.CONFIG_PATH ?? "./config"
+const dbUrl = process.env.TURSO_DATABASE_URL
+const dbToken = process.env.TURSO_AUTH_TOKEN
+
+export const client = createClient(
+  dbUrl
+    ? { url: dbUrl, authToken: dbToken }
+    : { url: `file:${configDir}/razzia.db` },
+)
+
+let migrated = false
+
+// Creates the schema if missing. Runs once per process; cheap to call on boot.
+export const initConfig = async () => {
+  if (migrated) {
+    return
+  }
+
+  await client.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS game_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      data TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS quizz (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS results (
+      id TEXT PRIMARY KEY,
+      data TEXT NOT NULL
+    );
+  `)
+
+  // Seed default game config (manager password) when the table is empty.
+  const configRow = await client.execute(
+    "SELECT data FROM game_config WHERE id = 1",
   )
+
+  if (configRow.rows.length === 0) {
+    await client.execute({
+      sql: "INSERT INTO game_config (id, data) VALUES (1, ?)",
+      args: [JSON.stringify({ managerPassword: "PASSWORD" })],
+    })
+  }
+
+  // Seed the example quizz when none exists yet.
+  const quizzRow = await client.execute("SELECT COUNT(*) AS count FROM quizz")
+
+  if (Number((quizzRow.rows[0] as unknown as CountRow).count) === 0) {
+    await client.execute({
+      sql: "INSERT INTO quizz (id, data) VALUES (?, ?)",
+      args: [nanoid(), JSON.stringify(EXAMPLE_QUIZZ)],
+    })
+  }
+
+  migrated = true
 }
 
-const requireFileById = (subDir: string, id: string, label: string): string => {
-  const file = findFileById(subDir, id)
-
-  if (!file) {
-    throw new Error(`${label} "${id}" not found`)
-  }
-
-  return file
+export const writeGameConfig = async (config: GameConfig) => {
+  await client.execute({
+    sql: "INSERT INTO game_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+    args: [JSON.stringify(config)],
+  })
 }
 
-export const initConfig = () => {
-  const isConfigFolderExists = fs.existsSync(getPath())
+export const getGameConfig = async (): Promise<GameConfig> => {
+  const result = await client.execute(
+    "SELECT data FROM game_config WHERE id = 1",
+  )
 
-  if (!isConfigFolderExists) {
-    fs.mkdirSync(getPath())
-  }
-
-  const isGameConfigExists = fs.existsSync(getPath("game.json"))
-
-  if (!isGameConfigExists) {
-    fs.writeFileSync(
-      getPath("game.json"),
-      JSON.stringify(
-        {
-          managerPassword: "PASSWORD",
-        },
-        null,
-        2,
-      ),
-    )
-  }
-
-  // Allow the manager password to be supplied via environment variable. This
-  // is the primary configuration method on managed platforms (e.g. Render):
-  // the value is applied on every boot so it survives rebuilds and can be
-  // rotated without touching the config volume.
-  const envPassword = process.env.MANAGER_PASSWORD
-
-  if (envPassword) {
-    const existing = readJson(getPath("game.json")) ?? {}
-    const nextPassword = envPassword.trim()
-
-    if (existing.managerPassword !== nextPassword) {
-      writeGameConfig({ ...existing, managerPassword: nextPassword })
-    }
-  }
-
-  const isQuizzExists = fs.existsSync(getPath("quizz"))
-
-  if (!isQuizzExists) {
-    fs.mkdirSync(getPath("quizz"))
-
-    fs.writeFileSync(
-      getPath("quizz/example.json"),
-      JSON.stringify({ id: nanoid(), ...EXAMPLE_QUIZZ }, null, 2),
-    )
-  }
-}
-
-export const writeGameConfig = (config: GameConfig) => {
-  fs.writeFileSync(getPath("game.json"), JSON.stringify(config, null, 2))
-}
-
-export const getGameConfig = (): GameConfig => {
-  const isExists = fs.existsSync(getPath("game.json"))
-
-  if (!isExists) {
+  if (result.rows.length === 0) {
     throw new Error("Game config not found")
   }
 
   try {
-    const config = fs.readFileSync(getPath("game.json"), "utf-8")
-
-    return JSON.parse(config) as GameConfig
+    return JSON.parse(readString(result.rows[0], "data")) as GameConfig
   } catch (error) {
     console.error("Failed to read game config:", error)
   }
@@ -147,104 +126,109 @@ export const getGameConfig = (): GameConfig => {
   return {} as GameConfig
 }
 
-export const getQuizzMeta = () =>
-  getQuizz().map(({ id, subject }) => ({ id, subject }))
+export const getQuizzMeta = async (): Promise<
+  Array<{ id: string; subject: string }>
+> => (await getQuizz()).map(({ id, subject }) => ({ id, subject }))
 
-export const getQuizzById = (id: string): QuizzWithId => {
-  const quizz = getQuizz().find((q) => q.id === id)
+export const getQuizzById = async (id: string): Promise<QuizzWithId> => {
+  const result = await client.execute({
+    sql: "SELECT data FROM quizz WHERE id = ?",
+    args: [id],
+  })
 
-  if (!quizz) {
+  if (result.rows.length === 0) {
     throw new Error(`Quizz "${id}" not found`)
   }
 
-  return quizz
-}
+  const parsed = parseQuizz(readString(result.rows[0], "data"), id)
 
-export const getQuizz = (): QuizzWithId[] => {
-  const isExists = fs.existsSync(getPath("quizz"))
-
-  if (!isExists) {
-    return []
+  if (!parsed) {
+    throw new Error(`Quizz "${id}" is invalid`)
   }
 
+  return parsed
+}
+
+export const getQuizz = async (): Promise<QuizzWithId[]> => {
+  const result = await client.execute("SELECT id, data FROM quizz")
+
+  return result.rows
+    .map((row) =>
+      parseQuizz(
+        readString(row as unknown as QuizzRow, "data"),
+        readString(row as unknown as QuizzRow, "id"),
+      ),
+    )
+    .filter((quizz): quizz is QuizzWithId => quizz !== null)
+}
+
+// Validates a stored payload and attaches its id. Warns (without dropping the
+// row) on schema drift so a bad record never silently deletes all quizzes.
+const parseQuizz = (data: string, id: string): QuizzWithId | null => {
   try {
-    const files = listJsonFiles(getPath("quizz"))
+    const parsed: unknown = JSON.parse(data)
+    const validate = quizzValidator.safeParse(parsed)
 
-    const quizz: QuizzWithId[] = files.flatMap((file) => {
-      const filePath = getPath(`quizz/${file}`)
-      const data = readJson(filePath)
+    if (!validate.success) {
+      console.warn(`Invalid quizz record "${id}":`, validate.error.issues)
 
-      if (!data) {
-        console.warn(`Invalid quizz config "${file}": unreadable`)
+      return null
+    }
 
-        return []
-      }
-
-      const result = quizzValidator.safeParse(data)
-
-      if (!result.success) {
-        console.warn(`Invalid quizz config "${file}":`, result.error.issues)
-
-        return []
-      }
-
-      if (typeof data.id === "string") {
-        return [{ id: data.id, ...result.data }]
-      }
-
-      const id = nanoid()
-
-      fs.writeFileSync(
-        filePath,
-        JSON.stringify({ id, ...result.data }, null, 2),
-      )
-
-      return [{ id, ...result.data }]
-    })
-
-    return quizz
+    return { id, ...validate.data }
   } catch (error) {
-    console.error("Failed to read quizz config:", error)
+    console.warn(`Unreadable quizz record "${id}":`, error)
 
-    return []
+    return null
   }
 }
 
-export const updateQuizz = (id: string, data: unknown): { id: string } => {
+export const updateQuizz = async (
+  id: string,
+  data: unknown,
+): Promise<{ id: string }> => {
   const result = quizzValidator.safeParse(data)
 
   if (!result.success) {
     throw new Error(result.error.issues[0].message)
   }
 
-  const file = requireFileById("quizz", id, "Quizz")
+  const existing = await client.execute({
+    sql: "SELECT id FROM quizz WHERE id = ?",
+    args: [id],
+  })
 
-  fs.writeFileSync(
-    join(getPath("quizz"), file),
-    JSON.stringify({ id, ...result.data }, null, 2),
-  )
+  if (existing.rows.length === 0) {
+    throw new Error(`Quizz "${id}" not found`)
+  }
+
+  await client.execute({
+    sql: "UPDATE quizz SET data = ? WHERE id = ?",
+    args: [JSON.stringify(result.data), id],
+  })
 
   return { id }
 }
 
-export const deleteQuizz = (id: string): void => {
-  const file = requireFileById("quizz", id, "Quizz")
+export const deleteQuizz = async (id: string): Promise<void> => {
+  const existing = await client.execute({
+    sql: "SELECT id FROM quizz WHERE id = ?",
+    args: [id],
+  })
 
-  fs.unlinkSync(join(getPath("quizz"), file))
+  if (existing.rows.length === 0) {
+    throw new Error(`Quizz "${id}" not found`)
+  }
+
+  await client.execute({ sql: "DELETE FROM quizz WHERE id = ?", args: [id] })
 }
 
-export const saveResult = (data: GameResult): void => {
+export const saveResult = async (data: GameResult): Promise<void> => {
   try {
-    const resultsPath = getPath("results")
-
-    if (!fs.existsSync(resultsPath)) {
-      fs.mkdirSync(resultsPath)
-    }
-
-    fs.writeFileSync(
-      join(resultsPath, `${nanoid()}.json`),
-      JSON.stringify(data, null, 2),
-    )
+    await client.execute({
+      sql: "INSERT INTO results (id, data) VALUES (?, ?)",
+      args: [data.id, JSON.stringify(data)],
+    })
 
     console.log(`Saved result for "${data.subject}"`)
   } catch (error) {
@@ -252,60 +236,55 @@ export const saveResult = (data: GameResult): void => {
   }
 }
 
-export const getResultsMeta = (): GameResultMeta[] => {
-  const resultsPath = getPath("results")
+export const getResultsMeta = async (): Promise<GameResultMeta[]> => {
+  const result = await client.execute("SELECT data FROM results")
 
-  if (!fs.existsSync(resultsPath)) {
-    return []
-  }
+  return result.rows
+    .map((row) => {
+      try {
+        const data = JSON.parse(readString(row, "data")) as GameResult
 
-  const readMeta = (file: string): GameResultMeta | null => {
-    const data = readJson(join(resultsPath, file)) as GameResult | null
-
-    if (!data) {
-      return null
-    }
-
-    try {
-      return {
-        id: data.id,
-        subject: data.subject,
-        date: data.date,
-        playerCount: data.players.length,
+        return {
+          id: data.id,
+          subject: data.subject,
+          date: data.date,
+          playerCount: data.players.length,
+        }
+      } catch {
+        return null
       }
-    } catch {
-      return null
-    }
-  }
-
-  try {
-    return listJsonFiles(resultsPath)
-      .map(readMeta)
-      .filter((meta): meta is GameResultMeta => meta !== null)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-  } catch {
-    return []
-  }
+    })
+    .filter((meta): meta is GameResultMeta => meta !== null)
+    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
 }
 
-export const getResultById = (id: string): GameResult => {
-  const file = requireFileById("results", id, "Result")
-  const data = readJson(join(getPath("results"), file))
+export const getResultById = async (id: string): Promise<GameResult> => {
+  const result = await client.execute({
+    sql: "SELECT data FROM results WHERE id = ?",
+    args: [id],
+  })
 
-  if (!data) {
+  if (result.rows.length === 0) {
     throw new Error(`Result "${id}" not found`)
   }
 
-  return data as unknown as GameResult
+  return JSON.parse(readString(result.rows[0], "data")) as GameResult
 }
 
-export const deleteResult = (id: string): void => {
-  const file = requireFileById("results", id, "Result")
+export const deleteResult = async (id: string): Promise<void> => {
+  const existing = await client.execute({
+    sql: "SELECT id FROM results WHERE id = ?",
+    args: [id],
+  })
 
-  fs.unlinkSync(join(getPath("results"), file))
+  if (existing.rows.length === 0) {
+    throw new Error(`Result "${id}" not found`)
+  }
+
+  await client.execute({ sql: "DELETE FROM results WHERE id = ?", args: [id] })
 }
 
-export const saveQuizz = (data: unknown): { id: string } => {
+export const saveQuizz = async (data: unknown): Promise<{ id: string }> => {
   const result = quizzValidator.safeParse(data)
 
   if (!result.success) {
@@ -313,12 +292,11 @@ export const saveQuizz = (data: unknown): { id: string } => {
   }
 
   const id = nanoid()
-  const fileName = normalizeFilename(result.data.subject)
 
-  fs.writeFileSync(
-    getPath(`quizz/${fileName}.json`),
-    JSON.stringify({ id, ...result.data }, null, 2),
-  )
+  await client.execute({
+    sql: "INSERT INTO quizz (id, data) VALUES (?, ?)",
+    args: [id, JSON.stringify(result.data)],
+  })
 
   return { id }
 }

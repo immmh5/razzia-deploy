@@ -15,3 +15,9 @@ services:
         value: /app/config
       - key: MANAGER_PASSWORD
         sync: false
+      # Turso (libSQL) database — persistent storage replacing the ephemeral
+      # filesystem. Configured via the Render dashboard; values never committed.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false

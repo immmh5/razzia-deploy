@@ -9,6 +9,7 @@
   "license": "ISC",
   "dependencies": {
     "@razzia/common": "workspace:*",
+    "@libsql/client": "^0.15.0",
     "dayjs": "^1.11.21",
     "nanoid": "^5.1.16",
     "socket.io": "^4.8.3",

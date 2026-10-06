@@ -15,9 +15,9 @@ export const managerSocketHandlers = ({ socket }: SocketContext) => {
     manager.logout(socket)
   })
 
-  socket.on(EVENTS.MANAGER.AUTH, (password) => {
+  socket.on(EVENTS.MANAGER.AUTH, async (password) => {
     try {
-      const config = getGameConfig()
+      const config = await getGameConfig()
 
       if (config.managerPassword === "PASSWORD") {
         socket.emit(

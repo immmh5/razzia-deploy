@@ -13,7 +13,16 @@ const WS_PORT = 3001
 const io: Server = new ServerIO({
   path: "/ws",
 })
+// Database is initialized before the socket server accepts connections so the
+// schema and seeded rows are guaranteed present on the first client handshake.
 initConfig()
+  .then(() => {
+    console.log("Database initialized")
+  })
+  .catch((error: unknown) => {
+    console.error("Failed to initialize database:", error)
+    process.exit(1)
+  })
 
 console.log(`Socket server running on port ${WS_PORT}`)
 io.listen(WS_PORT)

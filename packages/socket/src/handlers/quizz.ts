@@ -11,9 +11,9 @@ import manager, { emitConfig } from "@razzia/socket/services/manager"
 export const quizzSocketHandlers = ({ socket }: SocketContext) => {
   socket.on(
     EVENTS.QUIZZ.GET,
-    manager.withAuth(socket, (id) => {
+    manager.withAuth(socket, async (id) => {
       try {
-        const quizz = getQuizzById(id)
+        const quizz = await getQuizzById(id)
 
         socket.emit(EVENTS.QUIZZ.DATA, quizz)
       } catch (error) {
@@ -25,9 +25,9 @@ export const quizzSocketHandlers = ({ socket }: SocketContext) => {
 
   socket.on(
     EVENTS.QUIZZ.SAVE,
-    manager.withAuth(socket, (data) => {
+    manager.withAuth(socket, async (data) => {
       try {
-        const { id } = saveQuizz(data)
+        const { id } = await saveQuizz(data)
 
         socket.emit(EVENTS.QUIZZ.SAVE_SUCCESS, { id })
         emitConfig(socket)
@@ -42,11 +42,11 @@ export const quizzSocketHandlers = ({ socket }: SocketContext) => {
 
   socket.on(
     EVENTS.QUIZZ.DELETE,
-    manager.withAuth(socket, (id) => {
+    manager.withAuth(socket, async (id) => {
       try {
-        deleteQuizz(id)
+        await deleteQuizz(id)
 
-        emitConfig(socket)
+        await emitConfig(socket)
       } catch (error) {
         console.error("Failed to delete quizz:", error)
         socket.emit(EVENTS.QUIZZ.ERROR, "errors:quizz.failedToDelete")
@@ -56,12 +56,12 @@ export const quizzSocketHandlers = ({ socket }: SocketContext) => {
 
   socket.on(
     EVENTS.QUIZZ.UPDATE,
-    manager.withAuth(socket, ({ id, ...data }) => {
+    manager.withAuth(socket, async ({ id, ...data }) => {
       try {
-        const { id: newId } = updateQuizz(id, data)
+        const { id: newId } = await updateQuizz(id, data)
 
         socket.emit(EVENTS.QUIZZ.UPDATE_SUCCESS, { id: newId })
-        emitConfig(socket)
+        await emitConfig(socket)
       } catch (error) {
         console.error("Failed to update quizz:", error)
         const message =

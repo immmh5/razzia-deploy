@@ -6,9 +6,9 @@ import manager, { emitConfig } from "@razzia/socket/services/manager"
 export const resultsSocketHandlers = ({ socket }: SocketContext) => {
   socket.on(
     EVENTS.RESULTS.GET,
-    manager.withAuth(socket, (id) => {
+    manager.withAuth(socket, async (id) => {
       try {
-        socket.emit(EVENTS.RESULTS.DATA, getResultById(id))
+        socket.emit(EVENTS.RESULTS.DATA, await getResultById(id))
       } catch (error) {
         console.error("Failed to get result:", error)
       }
@@ -17,10 +17,10 @@ export const resultsSocketHandlers = ({ socket }: SocketContext) => {
 
   socket.on(
     EVENTS.RESULTS.DELETE,
-    manager.withAuth(socket, (id) => {
+    manager.withAuth(socket, async (id) => {
       try {
-        deleteResult(id)
-        emitConfig(socket)
+        await deleteResult(id)
+        await emitConfig(socket)
       } catch (error) {
         console.error("Failed to delete result:", error)
       }
